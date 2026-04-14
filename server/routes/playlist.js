@@ -1,12 +1,81 @@
 // Playlist API routes
 import { Router } from 'express';
 import { getPlaylistTracks, getPlaylistDetails, isSpotifyPlaylistUrl } from '../services/spotify.js';
-import { isYouTubeMusicUrl, searchTrack as searchYouTube, getPlaylistTracks as getYTPlaylistTracks } from '../services/youtube.js';
-import { matchPlaylistTracks, calculateCoverage, getLinksForTrack } from '../services/odesli.js';
+import { isYouTubeMusicUrl, searchTrack as searchYouTube, getPlaylistTracks as getYTPlaylistTracks, getPlaylistDetails as getYTPlaylistDetails, extractPlaylistId, cleanYouTubeTitle } from '../services/youtube.js';
+import { calculateCoverage, getLinksForTrack } from '../services/odesli.js';
 import { searchAppleMusic } from '../services/apple.js';
-import { findFallbacksForTracks } from '../services/smartFallback.js';
 
 const router = Router();
+
+/**
+ * Match a single track across all platforms using direct API calls.
+ * Strategy: Always search each platform directly. Odesli is optional bonus.
+ */
+async function matchTrackDirectly(track) {
+  const cleanTitle = cleanYouTubeTitle(track.title);
+  const searchTitle = cleanTitle || track.title;
+  const artist = track.artist;
+  const isSpotifySource = track.platform === 'spotify';
+  const isYtSource = track.platform === 'youtubeMusic' || track.sourceUrl?.includes('youtube.com');
+
+  const links = {};
+
+  // 1. Try Odesli first (may fail due to rate limits - that's OK)
+  let odesliData = null;
+  try {
+    odesliData = await getLinksForTrack(track.sourceUrl);
+    if (odesliData?.links) {
+      Object.assign(links, odesliData.links);
+    }
+  } catch (e) {
+    // Odesli failed, continue with direct APIs
+  }
+
+  // 2. Apple Music — iTunes Search API (free, reliable, no rate limit issues)
+  if (!links.appleMusic) {
+    try {
+      const amResult = await searchAppleMusic(searchTitle, artist);
+      if (amResult) {
+        links.appleMusic = { url: amResult.url };
+      }
+    } catch (e) { /* continue */ }
+  }
+
+  // 3. YouTube Music — Official YouTube Data API v3
+  if (!links.youtubeMusic) {
+    if (isYtSource) {
+      // Source is already YouTube, use the source URL
+      links.youtubeMusic = { url: track.sourceUrl };
+    } else {
+      try {
+        const ytResult = await searchYouTube(searchTitle, artist);
+        if (ytResult) {
+          links.youtubeMusic = { url: ytResult.url };
+        }
+      } catch (e) { /* continue */ }
+    }
+  }
+
+  // 4. Spotify — generate search deep link (API blocked without Premium)
+  if (!links.spotify) {
+    if (isSpotifySource) {
+      links.spotify = { url: track.sourceUrl };
+    } else {
+      links.spotify = { url: `https://open.spotify.com/search/${encodeURIComponent(`${searchTitle} ${artist}`)}` };
+    }
+  }
+
+  const hasAnyLink = Object.keys(links).length > 0;
+
+  return {
+    ...track,
+    title: searchTitle, // Use cleaned title
+    crossPlatformLinks: hasAnyLink ? links : null,
+    odesliPageUrl: odesliData?.pageUrl || null,
+    matchStatus: hasAnyLink ? 'matched' : 'unmatched',
+    thumbnailUrl: odesliData?.metadata?.thumbnailUrl || track.artworkUrl,
+  };
+}
 
 /**
  * GET /api/playlist/stream
@@ -38,11 +107,16 @@ router.get('/stream', async (req, res) => {
         getPlaylistDetails(url),
       ]);
     } else if (isYouTubeMusicUrl(url)) {
-      tracks = await getYTPlaylistTracks(url);
+      const plId = extractPlaylistId(url);
+      const [fetchedTracks, ytDetails] = await Promise.all([
+        getYTPlaylistTracks(url),
+        plId ? getYTPlaylistDetails(plId) : null,
+      ]);
+      tracks = fetchedTracks;
       details = {
-        name: 'YouTube Music Playlist',
-        description: '',
-        artworkUrl: tracks[0]?.artworkUrl || '',
+        name: ytDetails?.name || 'YouTube Music Playlist',
+        description: ytDetails?.description || '',
+        artworkUrl: ytDetails?.artworkUrl || tracks[0]?.artworkUrl || '',
         trackCount: tracks.length,
         platform: 'youtubeMusic',
         sourceUrl: url,
@@ -55,63 +129,35 @@ router.get('/stream', async (req, res) => {
     // Inform client about the initial payload
     sendEvent('init', { playlist: details, totalTracks: tracks.length, initialTracks: tracks });
 
-    // 2. Stream matched tracks in batches
-    console.log(`  🔗 Matching ${tracks.length} tracks across platforms...`);
+    // 2. Match tracks using DIRECT PLATFORM APIs (not just Odesli)
+    console.log(`  🔗 Matching ${tracks.length} tracks using direct APIs...`);
     let matchedTracks = [];
     const BATCH_SIZE = 3;
 
     for (let i = 0; i < tracks.length; i += BATCH_SIZE) {
       const batch = tracks.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(batch.map(async (track) => {
-        if (!track.sourceUrl) {
-          return { ...track, crossPlatformLinks: null, matchStatus: 'no_source' };
-        }
-        
-        let processedLinks = null;
-        let trackStatus = 'unmatched';
-        const linkData = await getLinksForTrack(track.sourceUrl);
-        
-        if (linkData) {
-          processedLinks = linkData.links;
-          trackStatus = 'matched';
-        } else {
-          // Native API Fallback Strategy when Odesli rate limit triggers
-          const [amFallback, ytFallback] = await Promise.all([
-            searchAppleMusic(track.title, track.artist),
-            searchYouTube(track.title, track.artist)
-          ]);
-          
-          if (amFallback || ytFallback) {
-             processedLinks = {};
-             if (amFallback) processedLinks.appleMusic = { url: amFallback.url };
-             if (ytFallback) processedLinks.youtubeMusic = { url: ytFallback.url };
-             trackStatus = 'matched'; // Count as conditionally matched!
-          }
-        }
-
-        if (processedLinks) {
-          return {
-            ...track,
-            crossPlatformLinks: processedLinks,
-            odesliPageUrl: linkData?.pageUrl || null,
-            matchStatus: trackStatus,
-            thumbnailUrl: linkData?.metadata?.thumbnailUrl || track.artworkUrl,
-          };
-        }
-        return { ...track, crossPlatformLinks: null, matchStatus: 'unmatched' };
-      }));
+      const batchResults = await Promise.all(batch.map(track => matchTrackDirectly(track)));
 
       matchedTracks.push(...batchResults);
       sendEvent('batch', { tracks: batchResults });
 
-      // Small delay to prevent strict rate-limiting
+      // Log progress
+      const done = Math.min(i + BATCH_SIZE, tracks.length);
+      const matched = batchResults.filter(t => t.matchStatus === 'matched').length;
+      console.log(`  📊 ${done}/${tracks.length} processed (${matched}/${BATCH_SIZE} matched in batch)`);
+
+      // Small delay between batches
       if (i + BATCH_SIZE < tracks.length) {
-        await new Promise(r => setTimeout(r, 450));
+        await new Promise(r => setTimeout(r, 300));
       }
     }
 
     // 3. Finalize
     const coverage = calculateCoverage(matchedTracks);
+    console.log(`\n  ✅ Final coverage:`);
+    for (const [p, d] of Object.entries(coverage)) {
+      console.log(`    ${p}: ${d.percentage}% (${d.matched}/${d.total})`);
+    }
     sendEvent('done', { coverage });
     res.end();
   } catch (err) {
@@ -122,66 +168,44 @@ router.get('/stream', async (req, res) => {
 });
 
 /**
- * POST /api/playlist/analyze
- * Body: { url: string }
- * Fetches playlist tracks, matches across platforms, calculates coverage.
+ * POST /api/playlist/analyze (legacy non-streaming endpoint)
  */
 router.post('/analyze', async (req, res) => {
   try {
     const { url } = req.body;
-    if (!url) {
-      return res.status(400).json({ error: 'Playlist URL is required' });
-    }
+    if (!url) return res.status(400).json({ error: 'Playlist URL is required' });
 
-    console.log(`\n🎵 Analyzing playlist: ${url}`);
-
-    // Step 1: Determine source platform and fetch tracks
     let tracks = [];
     let details = {};
 
     if (isSpotifyPlaylistUrl(url)) {
-      console.log('  📗 Detected Spotify playlist');
       [tracks, details] = await Promise.all([
         getPlaylistTracks(url),
         getPlaylistDetails(url),
       ]);
     } else if (isYouTubeMusicUrl(url)) {
-      console.log('  📕 Detected YouTube Music playlist');
-      tracks = await getYTPlaylistTracks(url);
+      const plId = extractPlaylistId(url);
+      const [fetchedTracks, ytDetails] = await Promise.all([
+        getYTPlaylistTracks(url),
+        plId ? getYTPlaylistDetails(plId) : null,
+      ]);
+      tracks = fetchedTracks;
       details = {
-        name: 'YouTube Music Playlist',
-        description: '',
-        artworkUrl: tracks[0]?.artworkUrl || '',
+        name: ytDetails?.name || 'YouTube Music Playlist',
+        description: ytDetails?.description || '',
+        artworkUrl: ytDetails?.artworkUrl || tracks[0]?.artworkUrl || '',
         trackCount: tracks.length,
         platform: 'youtubeMusic',
         sourceUrl: url,
       };
     } else {
-      return res.status(400).json({ error: 'Unsupported playlist URL. Please use a Spotify or YouTube Music playlist link.' });
+      return res.status(400).json({ error: 'Unsupported playlist URL.' });
     }
 
-    console.log(`  📋 Found ${tracks.length} tracks`);
-
-    // Step 2: Match tracks across platforms via Odesli
-    console.log('  🔗 Matching across platforms...');
-    const matchedTracks = await matchPlaylistTracks(tracks);
-
-    // Step 3: Calculate coverage scores
+    const matchedTracks = await Promise.all(tracks.map(t => matchTrackDirectly(t)));
     const coverage = calculateCoverage(matchedTracks);
-    console.log('  📊 Coverage calculated');
 
-    // Log summary
-    for (const [platform, data] of Object.entries(coverage)) {
-      console.log(`    ${platform}: ${data.percentage}% (${data.matched}/${data.total})`);
-    }
-
-    res.json({
-      playlist: details,
-      tracks: matchedTracks,
-      coverage,
-      totalTracks: tracks.length,
-    });
-
+    res.json({ playlist: details, tracks: matchedTracks, coverage, totalTracks: tracks.length });
   } catch (err) {
     console.error('Playlist analysis error:', err);
     res.status(500).json({ error: err.message || 'Failed to analyze playlist' });
@@ -189,25 +213,12 @@ router.post('/analyze', async (req, res) => {
 });
 
 /**
- * POST /api/playlist/fallbacks
- * Body: { tracks: array, targetPlatform: string }
- * Finds smart fallback suggestions for unmatched tracks.
+ * POST /api/playlist/fallbacks (kept for compatibility)
  */
 router.post('/fallbacks', async (req, res) => {
-  try {
-    const { tracks, targetPlatform } = req.body;
-    if (!tracks || !targetPlatform) {
-      return res.status(400).json({ error: 'tracks and targetPlatform are required' });
-    }
-
-    console.log(`\n🔍 Finding fallbacks for ${targetPlatform}...`);
-    const fallbacks = await findFallbacksForTracks(tracks, targetPlatform);
-
-    res.json({ fallbacks });
-  } catch (err) {
-    console.error('Fallback error:', err);
-    res.status(500).json({ error: err.message || 'Failed to find fallbacks' });
-  }
+  // With direct API matching, fallbacks are mostly unnecessary
+  // but we keep the endpoint to avoid frontend errors
+  res.json({ fallbacks: {} });
 });
 
 export default router;

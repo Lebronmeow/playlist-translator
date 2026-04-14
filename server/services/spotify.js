@@ -31,11 +31,33 @@ export async function getPlaylistTracks(url) {
  */
 export async function getPlaylistDetails(url) {
   try {
-    const details = await getDetails(url);
+    let details = {};
+    try {
+      details = await getDetails(url);
+    } catch (e) {
+      // Scraper package failed, fallback will engage
+    }
+
+    // HTML Fallback for missing title/artwork due to Spotify DOM changes
+    let ogTitle = null;
+    let ogImage = null;
+    if (!details.title && !details.name) {
+      try {
+        const htmlRes = await fetch(url);
+        const html = await htmlRes.text();
+        const titleMatch = html.match(/<meta property="og:title" content="([^"]+)"/);
+        const imageMatch = html.match(/<meta property="og:image" content="([^"]+)"/);
+        if (titleMatch) ogTitle = titleMatch[1];
+        if (imageMatch) ogImage = imageMatch[1];
+      } catch (htmlErr) {
+        // Silently continue
+      }
+    }
+
     return {
-      name: details.title || details.name || 'Unknown Playlist',
+      name: details.title || details.name || ogTitle || 'Unknown Playlist',
       description: details.description || '',
-      artworkUrl: details.coverArt?.sources?.[0]?.url || details.thumbnail || '',
+      artworkUrl: details.coverArt?.sources?.[0]?.url || details.thumbnail || ogImage || '',
       trackCount: details.trackCount || 0,
       platform: 'spotify',
       sourceUrl: url,

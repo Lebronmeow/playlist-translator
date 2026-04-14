@@ -1,8 +1,9 @@
 // Playlist API routes
 import { Router } from 'express';
 import { getPlaylistTracks, getPlaylistDetails, isSpotifyPlaylistUrl } from '../services/spotify.js';
-import { isYouTubeMusicUrl, getPlaylistTracks as getYTPlaylistTracks } from '../services/youtube.js';
+import { isYouTubeMusicUrl, searchTrack as searchYouTube, getPlaylistTracks as getYTPlaylistTracks } from '../services/youtube.js';
 import { matchPlaylistTracks, calculateCoverage, getLinksForTrack } from '../services/odesli.js';
+import { searchAppleMusic } from '../services/apple.js';
 import { findFallbacksForTracks } from '../services/smartFallback.js';
 
 const router = Router();
@@ -66,14 +67,35 @@ router.get('/stream', async (req, res) => {
           return { ...track, crossPlatformLinks: null, matchStatus: 'no_source' };
         }
         
+        let processedLinks = null;
+        let trackStatus = 'unmatched';
         const linkData = await getLinksForTrack(track.sourceUrl);
+        
         if (linkData) {
+          processedLinks = linkData.links;
+          trackStatus = 'matched';
+        } else {
+          // Native API Fallback Strategy when Odesli rate limit triggers
+          const [amFallback, ytFallback] = await Promise.all([
+            searchAppleMusic(track.title, track.artist),
+            searchYouTube(track.title, track.artist)
+          ]);
+          
+          if (amFallback || ytFallback) {
+             processedLinks = {};
+             if (amFallback) processedLinks.appleMusic = { url: amFallback.url };
+             if (ytFallback) processedLinks.youtubeMusic = { url: ytFallback.url };
+             trackStatus = 'matched'; // Count as conditionally matched!
+          }
+        }
+
+        if (processedLinks) {
           return {
             ...track,
-            crossPlatformLinks: linkData.links,
-            odesliPageUrl: linkData.pageUrl,
-            matchStatus: 'matched',
-            thumbnailUrl: linkData.metadata.thumbnailUrl || track.artworkUrl,
+            crossPlatformLinks: processedLinks,
+            odesliPageUrl: linkData?.pageUrl || null,
+            matchStatus: trackStatus,
+            thumbnailUrl: linkData?.metadata?.thumbnailUrl || track.artworkUrl,
           };
         }
         return { ...track, crossPlatformLinks: null, matchStatus: 'unmatched' };

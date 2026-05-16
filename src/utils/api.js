@@ -1,6 +1,16 @@
 // Frontend API client — all calls to backend
 const API_BASE = '/api';
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export function analyzePlaylistStream(url, callbacks) {
   const { onInit, onBatch, onDone, onError } = callbacks;
   const es = new EventSource(`${API_BASE}/playlist/stream?url=${encodeURIComponent(url)}`);
@@ -80,6 +90,54 @@ export async function generateUniversalLink(data) {
 
 export async function getUniversalLink(id) {
   const response = await fetch(`${API_BASE}/link/${id}`);
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || `Server error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function startGoogleOAuth() {
+  const response = await fetchWithTimeout(`${API_BASE}/auth/google`, {}, 15000);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || `Server error: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function createYtmPlaylist(sessionId, playlistName, tracks) {
+  const response = await fetchWithTimeout(`${API_BASE}/playlist/create-ytm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, playlistName, tracks }),
+  }, 120000);
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || `Server error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function startSpotifyOAuth() {
+  const response = await fetchWithTimeout(`${API_BASE}/auth/spotify`, {}, 15000);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || `Server error: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function createSpotifyPlaylistOnAccount(sessionId, playlistName, tracks) {
+  const response = await fetchWithTimeout(`${API_BASE}/playlist/create-spotify-user`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, playlistName, tracks }),
+  }, 120000);
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({ error: 'Unknown error' }));

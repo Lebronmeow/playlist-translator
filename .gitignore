@@ -27,3 +27,17 @@ dist-ssr
 .vercel
 data/*
 .env
+
+# Embedded repos & debug files
+spotapi_temp/
+debug_*.py
+debug_*.js
+test_*.py
+test_*.js
+test_*.bat
+verify_*.js
+spotify_page.html
+app_server_config.json
+server/python/
+server/debug_*.js
+server/test_*.js

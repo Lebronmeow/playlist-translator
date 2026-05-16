@@ -4,12 +4,29 @@ import fetch from 'isomorphic-unfetch';
 
 const { getTracks, getDetails } = spotifyUrlInfo(fetch);
 
+import { spotifyService } from './spotifyService.js';
+
 /**
  * Extract tracks from a public Spotify playlist URL.
- * Returns up to 100 tracks (library limit).
  */
 export async function getPlaylistTracks(url) {
   try {
+    const playlistId = url.split('playlist/')[1]?.split('?')[0];
+    if (!playlistId) throw new Error('Invalid Spotify playlist URL');
+
+    // 1. Attempt to use Official API (Highest quality, supports pagination > 100)
+    try {
+      console.log('Attempting Official Spotify API for ID:', playlistId);
+      const tracks = await spotifyService.getPlaylistTracks(playlistId);
+      if (tracks && tracks.length > 0) {
+        console.log(`Official API successful, fetched ${tracks.length} tracks.`);
+        return tracks;
+      }
+    } catch (officialErr) {
+      console.warn('Official Spotify API failed, falling back to scrapers:', officialErr.message);
+    }
+    
+    // 2. Fallback to scrapers (capped at 100 tracks)
     const tracks = await getTracks(url);
     return tracks.map(track => ({
       title: track.name || track.title || 'Unknown',
@@ -31,6 +48,21 @@ export async function getPlaylistTracks(url) {
  */
 export async function getPlaylistDetails(url) {
   try {
+    const playlistId = url.split('playlist/')[1]?.split('?')[0];
+
+    // 1. Try Official API first
+    if (playlistId) {
+      try {
+        const details = await spotifyService.getPlaylistDetails(playlistId);
+        if (details && details.name) {
+          return { ...details, sourceUrl: url };
+        }
+      } catch (officialErr) {
+        console.warn('Official API details fetch failed:', officialErr.message);
+      }
+    }
+
+    // 2. Fallback to scraper
     let details = {};
     try {
       details = await getDetails(url);

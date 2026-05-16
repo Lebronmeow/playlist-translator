@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Link as LinkIcon } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 export default function URLInput({ onSubmit, loading }) {
   const [url, setUrl] = useState('');
@@ -20,7 +21,14 @@ export default function URLInput({ onSubmit, loading }) {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="url-input-wrapper" id="url-input-form">
+    <motion.form
+      onSubmit={handleSubmit}
+      className="url-input-wrapper"
+      id="url-input-form"
+      initial={{ opacity: 0, scale: 0.95, y: 16 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      transition={{ duration: 0.5, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
+    >
       <div className="url-input-glow" />
       <div className="url-input-container">
         <span className="url-input-icon">
@@ -37,11 +45,14 @@ export default function URLInput({ onSubmit, loading }) {
           autoComplete="off"
           spellCheck="false"
         />
-        <button
+        <motion.button
           type="submit"
           className="btn btn-primary btn-lg"
           disabled={!url.trim() || loading}
           id="translate-btn"
+          whileHover={{ scale: 1.03, y: -1 }}
+          whileTap={{ scale: 0.97 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 20 }}
         >
           {loading ? (
             <>
@@ -51,13 +62,23 @@ export default function URLInput({ onSubmit, loading }) {
           ) : (
             <>Translate Playlist</>
           )}
-        </button>
+        </motion.button>
       </div>
-      {url && !platform && url.length > 10 && (
-        <div className="error-message" style={{ marginTop: '0.75rem' }}>
-          Please paste a valid Spotify or YouTube Music playlist URL
-        </div>
-      )}
-    </form>
+
+      <AnimatePresence>
+        {url && !platform && url.length > 10 && (
+          <motion.div
+            className="error-message"
+            style={{ marginTop: '0.75rem' }}
+            initial={{ opacity: 0, y: -8, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.95 }}
+            transition={{ duration: 0.25 }}
+          >
+            Please paste a valid Spotify or YouTube Music playlist URL
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.form>
   );
 }
